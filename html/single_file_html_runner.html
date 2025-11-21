@@ -1,78 +1,183 @@
-<header>
-  <label class="btn">
-    <strong>Select ZIP</strong>
-    <input id="zip" type="file" accept=".zip" />
-  </label>
-  <select id="fileSelect"></select>
-  <div id="status">No ZIP loaded</div>
-</header>
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>ZIP Runner</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0;
+      font-family: system-ui, sans-serif;
+      background: #121212;
+      color: #eee;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px;
+      background: #1e1e1e;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.6);
+      border-radius: 0 0 12px 12px;
+    }
+    label.btn {
+      background: #2a2a2a;
+      padding: 8px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.5);
+      transition: background 0.2s;
+    }
+    label.btn:hover { background: #3a3a3a; }
+    input[type=file] { display: none; }
+    select {
+      background: #2a2a2a;
+      color: #eee;
+      border: none;
+      border-radius: 8px;
+      padding: 6px 10px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.5);
+    }
+    #status { flex: 1; font-size: 14px; opacity: 0.8; }
 
-<iframe id="stage" sandbox="allow-scripts allow-downloads" referrerpolicy="no-referrer"></iframe>
-
-<!-- fflate: ZIP extraction library -->
-<script src="https://cdn.jsdelivr.net/npm/fflate/umd/index.js"></script>
-
-<script>
-  const statusEl = document.getElementById('status');
-  const stage = document.getElementById('stage');
-  const input = document.getElementById('zip');
-  const fileSelect = document.getElementById('fileSelect');
-
-  let entries = {}, map = {};
-
-  function launchFile(name) {
-    // Decode file as text (works for HTML, CSS, JS, etc.)
-    const raw = new TextDecoder().decode(entries[name]);
-    const html = rewriteHtmlPaths(raw, (p) => {
-      const baseDir = name.includes('/') ? name.slice(0, name.lastIndexOf('/') + 1) : '';
-      const rel = (baseDir + p)
-        .replace(/\\/g,'/')
-        .replace(/\/\.\//g,'/')
-        .replace(/\/[^\/]+\/\.\.\//g,'/');
-      return map[rel] || map[p] || null;
-    });
-    launchSite(html, map);
-    statusEl.textContent = `Running: ${name}`;
-  }
-
-  fileSelect.addEventListener('change', () => {
-    const name = fileSelect.value;
-    if (name) launchFile(name);
-  });
-
-  input.addEventListener('change', async () => {
-    const file = input.files?.[0];
-    if (!file) return;
-    statusEl.textContent = 'Reading ZIP…';
-
-    const buf = new Uint8Array(await file.arrayBuffer());
-
-    // 🔑 unzip with fflate
-    const unzipped = fflate.unzipSync(buf);
-
-    // Build entries and Blob URLs
-    entries = {};
-    map = {};
-    for (const [name, bytes] of Object.entries(unzipped)) {
-      entries[name] = bytes;
-      const type = "application/octet-stream"; // refine MIME if needed
-      map[name] = URL.createObjectURL(new Blob([bytes], { type }));
+    #stage {
+      width: 100%;
+      height: calc(100vh - 70px);
+      border: none;
+      border-radius: 12px;
+      box-shadow: 0 0 12px rgba(0,0,0,0.7);
     }
 
-    // Populate dropdown with ALL files
-    fileSelect.innerHTML = '';
-    Object.keys(entries).forEach(n => {
-      const opt = document.createElement('option');
-      opt.value = n;
-      opt.textContent = n;
-      fileSelect.appendChild(opt);
+    /* Fullscreen button */
+    #fullscreenBtn {
+      position: fixed;
+      top: 12px;
+      right: 12px;
+      background: #2a2a2a;
+      color: #eee;
+      border: none;
+      border-radius: 50%;
+      width: 40px;
+      height: 40px;
+      cursor: pointer;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.6);
+      opacity: 0.3;
+      transition: opacity 0.3s;
+      z-index: 1000;
+    }
+    #fullscreenBtn:hover { opacity: 1; }
+
+    /* Progress bar */
+    #progressContainer {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      width: 100%;
+      height: 6px;
+      background: #2a2a2a;
+    }
+    #progressBar {
+      width: 0%;
+      height: 100%;
+      background: #4caf50;
+      transition: width 0.2s;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <label class="btn">
+      <strong>Select ZIP</strong>
+      <input id="zip" type="file" accept=".zip" />
+    </label>
+    <select id="fileSelect"></select>
+    <div id="status">No ZIP loaded</div>
+  </header>
+
+  <iframe id="stage" sandbox="allow-scripts allow-downloads" referrerpolicy="no-referrer"></iframe>
+  <button id="fullscreenBtn">⛶</button>
+  <div id="progressContainer"><div id="progressBar"></div></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/fflate/umd/index.js"></script>
+  <script>
+    const statusEl = document.getElementById('status');
+    const stage = document.getElementById('stage');
+    const input = document.getElementById('zip');
+    const fileSelect = document.getElementById('fileSelect');
+    const fullscreenBtn = document.getElementById('fullscreenBtn');
+    const progressBar = document.getElementById('progressBar');
+
+    let entries = {}, map = {};
+
+    function ext(name) {
+      const i = name.lastIndexOf(".");
+      return i === -1 ? "" : name.slice(i+1).toLowerCase();
+    }
+
+    function launchFile(name) {
+      const raw = new TextDecoder().decode(entries[name]);
+      const html = raw; // keep simple, or apply rewriteHtmlPaths if needed
+      stage.srcdoc = html;
+      statusEl.textContent = `Running: ${name}`;
+    }
+
+    fileSelect.addEventListener('change', () => {
+      const name = fileSelect.value;
+      if (name) launchFile(name);
     });
 
-    if (Object.keys(entries).length) {
-      fileSelect.value = Object.keys(entries)[0];
-      launchFile(Object.keys(entries)[0]); // auto-launch first file
-    } else {
-      statusEl.textContent = 'No files found in ZIP.';
-    }
-  });
-</script>
+    input.addEventListener('change', async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      statusEl.textContent = 'Reading ZIP…';
+
+      const buf = new Uint8Array(await file.arrayBuffer());
+
+      // Show progress bar during unzip
+      progressBar.style.width = '10%';
+
+      const unzipped = fflate.unzipSync(buf);
+
+      progressBar.style.width = '60%';
+
+      entries = {};
+      map = {};
+      for (const [name, bytes] of Object.entries(unzipped)) {
+        entries[name] = bytes;
+        const type = "application/octet-stream";
+        map[name] = URL.createObjectURL(new Blob([bytes], { type }));
+      }
+
+      progressBar.style.width = '90%';
+
+      fileSelect.innerHTML = '';
+      Object.keys(entries).forEach(n => {
+        const opt = document.createElement('option');
+        opt.value = n;
+        opt.textContent = n;
+        fileSelect.appendChild(opt);
+      });
+
+      if (Object.keys(entries).length) {
+        fileSelect.value = Object.keys(entries)[0];
+        launchFile(Object.keys(entries)[0]);
+        progressBar.style.width = '100%';
+        setTimeout(() => progressBar.style.width = '0%', 1000);
+      } else {
+        statusEl.textContent = 'No files found in ZIP.';
+        progressBar.style.width = '0%';
+      }
+    });
+
+    // Fullscreen toggle
+    fullscreenBtn.addEventListener('click', () => {
+      if (!document.fullscreenElement) {
+        stage.requestFullscreen();
+      } else {
+        document.exitFullscreen();
+      }
+    });
+  </script>
+</body>
+</html>
