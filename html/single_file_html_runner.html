@@ -3,7 +3,7 @@
     <strong>Select ZIP</strong>
     <input id="zip" type="file" accept=".zip" />
   </label>
-  <select id="htmlSelect"></select>
+  <select id="fileSelect"></select>
   <div id="status">No ZIP loaded</div>
 </header>
 <iframe id="stage" sandbox="allow-scripts allow-downloads" referrerpolicy="no-referrer"></iframe>
@@ -12,17 +12,12 @@
   const statusEl = document.getElementById('status');
   const stage = document.getElementById('stage');
   const input = document.getElementById('zip');
-  const htmlSelect = document.getElementById('htmlSelect');
+  const fileSelect = document.getElementById('fileSelect');
 
   let entries = {}, map = {};
 
-  // Helper: get lowercase extension
-  function ext(name) {
-    const i = name.lastIndexOf(".");
-    return i === -1 ? "" : name.slice(i+1).toLowerCase();
-  }
-
-  function launchHtml(name) {
+  function launchFile(name) {
+    // Decode file as text (works for HTML, CSS, JS, etc.)
     const raw = new TextDecoder().decode(entries[name]);
     const html = rewriteHtmlPaths(raw, (p) => {
       const baseDir = name.includes('/') ? name.slice(0, name.lastIndexOf('/') + 1) : '';
@@ -33,9 +28,9 @@
     statusEl.textContent = `Running: ${name}`;
   }
 
-  htmlSelect.addEventListener('change', () => {
-    const name = htmlSelect.value;
-    if (name) launchHtml(name);
+  fileSelect.addEventListener('change', () => {
+    const name = fileSelect.value;
+    if (name) launchFile(name);
   });
 
   input.addEventListener('change', async () => {
@@ -47,25 +42,20 @@
     // TODO: unzipSync logic here → fill entries
     // TODO: build map of Blob URLs here
 
-    // Detect HTML files (case-insensitive, includes .htm)
-    const htmlFiles = Object.keys(entries).filter(n => {
-      const e = ext(n);
-      return e === 'html' || e === 'htm';
-    });
-
-    htmlSelect.innerHTML = '';
-    htmlFiles.forEach(n => {
+    // Populate dropdown with ALL files
+    fileSelect.innerHTML = '';
+    Object.keys(entries).forEach(n => {
       const opt = document.createElement('option');
       opt.value = n;
       opt.textContent = n;
-      htmlSelect.appendChild(opt);
+      fileSelect.appendChild(opt);
     });
 
-    if (htmlFiles.length) {
-      htmlSelect.value = htmlFiles[0];
-      launchHtml(htmlFiles[0]);
+    if (Object.keys(entries).length) {
+      fileSelect.value = Object.keys(entries)[0];
+      launchFile(Object.keys(entries)[0]); // auto-launch first file
     } else {
-      statusEl.textContent = 'No HTML files found in ZIP.';
+      statusEl.textContent = 'No files found in ZIP.';
     }
   });
 </script>
