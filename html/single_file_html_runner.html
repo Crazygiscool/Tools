@@ -94,7 +94,7 @@
     <div id="status">No file loaded</div>
   </header>
 
-  <iframe id="stage" sandbox="allow-scripts allow-downloads" referrerpolicy="no-referrer"></iframe>
+  <iframe id="stage" sandbox="allow-scripts allow-same-origin allow-downloads" referrerpolicy="no-referrer"></iframe>
   <button id="fullscreenBtn">⛶</button>
   <div id="progressContainer"><div id="progressBar"></div></div>
 
@@ -108,39 +108,142 @@
     const fullscreenBtn = document.getElementById('fullscreenBtn');
     const progressBar = document.getElementById('progressBar');
 
-    let entries = {}, map = {};
+    let entries = {};      // name -> Uint8Array
+    let blobMap = {};      // name -> Blob URL (for fallback)
+    let vfsReady = false;  // service worker ready state
+    let vfsFiles = {};     // name -> { bytes, type }
 
-    // Utility: guess MIME type
+    // --- Service Worker (in-page) ---
+    async function ensureVfsServiceWorker() {
+      if ('serviceWorker' in navigator) {
+        if (vfsReady) return;
+        const swCode = `
+          const files = new Map();
+          self.addEventListener('message', (e) => {
+            const { type, payload } = e.data || {};
+            if (type === 'VFS_SET') {
+              // payload: [{ path, bytes, mime }]
+              for (const f of payload) {
+                files.set('/vfs/' + f.path, { bytes: f.bytes, mime: f.mime });
+              }
+              // Keep a simple index page for debugging
+              const list = Array.from(files.keys()).map(k => '<li>' + k + '</li>').join('');
+              const indexHtml = '<!doctype html><meta charset=utf-8><base href="/vfs/"><ul>' + list + '</ul>';
+              files.set('/vfs/index.html', { bytes: new TextEncoder().encode(indexHtml), mime: 'text/html' });
+              // Ack
+              self.clients.matchAll().then(clients => {
+                for (const c of clients) c.postMessage({ type: 'VFS_READY' });
+              });
+            }
+          });
+
+          self.addEventListener('fetch', (event) => {
+            const url = new URL(event.request.url);
+            if (url.pathname.startsWith('/vfs/')) {
+              const file = files.get(url.pathname);
+              if (file) {
+                event.respondWith(new Response(file.bytes, {
+                  status: 200,
+                  headers: { 'Content-Type': file.mime }
+                }));
+                return;
+              }
+              event.respondWith(new Response('Not found', { status: 404 }));
+            }
+          });
+        `;
+        const blob = new Blob([swCode], { type: 'application/javascript' });
+        const swUrl = URL.createObjectURL(blob);
+        const reg = await navigator.serviceWorker.register(swUrl);
+        await navigator.serviceWorker.ready;
+        vfsReady = true;
+      }
+    }
+
     function mimeType(name) {
+      if (name.endsWith('.html') || name.endsWith('.htm')) return 'text/html';
       if (name.endsWith('.js')) return 'application/javascript';
+      if (name.endsWith('.css')) return 'text/css';
       if (name.endsWith('.wasm')) return 'application/wasm';
       if (name.endsWith('.data')) return 'application/octet-stream';
-      if (name.endsWith('.html') || name.endsWith('.htm')) return 'text/html';
-      return 'text/plain';
+      if (name.endsWith('.json')) return 'application/json';
+      if (name.endsWith('.png')) return 'image/png';
+      if (name.endsWith('.jpg') || name.endsWith('.jpeg')) return 'image/jpeg';
+      if (name.endsWith('.gif')) return 'image/gif';
+      if (name.endsWith('.webp')) return 'image/webp';
+      if (name.endsWith('.mp3')) return 'audio/mpeg';
+      if (name.endsWith('.ogg')) return 'audio/ogg';
+      if (name.endsWith('.mp4')) return 'video/mp4';
+      return 'application/octet-stream';
     }
 
-    // Patch Unity HTML to replace resource paths with blob URLs
-    function patchUnityHtml(name) {
-      let raw = new TextDecoder().decode(entries[name]);
-      for (const [fname, blobUrl] of Object.entries(map)) {
-        // Replace only relative references
-        const safe = fname.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-        raw = raw.replace(new RegExp(safe, 'g'), blobUrl);
+    // Build VFS payload and post to SW
+    async function loadIntoVfs() {
+      await ensureVfsServiceWorker();
+      const files = Object.entries(entries).map(([path, bytes]) => ({
+        path,
+        bytes,
+        mime: mimeType(path)
+      }));
+      vfsFiles = {};
+      for (const f of files) vfsFiles[f.path] = { bytes: f.bytes, type: f.mime };
+
+      // Send to SW
+      navigator.serviceWorker.controller?.postMessage({ type: 'VFS_SET', payload: files });
+
+      // Wait for ack (first time)
+      return new Promise((resolve) => {
+        const onMsg = (e) => {
+          if (e.data && e.data.type === 'VFS_READY') {
+            navigator.serviceWorker.removeEventListener('message', onMsg);
+            resolve();
+          }
+        };
+        navigator.serviceWorker.addEventListener('message', onMsg);
+        // In case SW already ready
+        setTimeout(() => resolve(), 200);
+      });
+    }
+
+    // Create an HTML wrapper that injects <base href="/vfs/">
+    function wrapWithBase(htmlBytes) {
+      const raw = new TextDecoder().decode(htmlBytes);
+      const hasHead = /<head[^>]*>/i.test(raw);
+      const baseTag = '<base href="/vfs/">';
+      if (hasHead) {
+        return raw.replace(/<head[^>]*>/i, (m) => m + baseTag);
       }
-      return raw;
+      // No <head>, inject into <html>
+      if (/<html[^>]*>/i.test(raw)) {
+        return raw.replace(/<html[^>]*>/i, (m) => m + '<head>' + baseTag + '</head>');
+      }
+      // Fallback: prepend
+      return '<head>' + baseTag + '</head>' + raw;
     }
 
-    function launchFile(name) {
-      if (!entries[name]) return;
-      const isUnity = /\.html?$/.test(name) &&
-                      Object.keys(entries).some(f => f.endsWith('.wasm') || f.includes('UnityLoader.js'));
+    // Decide Unity build
+    function isUnityBuild() {
+      const names = Object.keys(entries);
+      return names.some(n => n.endsWith('.wasm')) || names.some(n => /UnityLoader\.js|UnityProgress\.js/i.test(n));
+    }
 
-      if (isUnity) {
-        const patched = patchUnityHtml(name);
-        const blob = new Blob([patched], { type: 'text/html' });
-        stage.src = URL.createObjectURL(blob);
+    // Launch file from ZIP via VFS
+    async function launchFile(name) {
+      if (!entries[name]) return;
+
+      const unity = isUnityBuild();
+
+      if (unity) {
+        // Serve everything under /vfs/ and ensure relative paths resolve
+        await loadIntoVfs();
+        const wrapped = wrapWithBase(entries[name]);
+        const blob = new Blob([wrapped], { type: 'text/html' });
+        const url = URL.createObjectURL(blob);
+        // Use src (not srcdoc) so Unity can fetch relative resources
+        stage.src = url;
         statusEl.textContent = `Running Unity: ${name}`;
       } else {
+        // Non-Unity: keep your original srcdoc behavior
         const raw = new TextDecoder().decode(entries[name]);
         stage.srcdoc = raw;
         statusEl.textContent = `Running: ${name}`;
@@ -165,25 +268,30 @@
       progressBar.style.width = '60%';
 
       entries = {};
-      map = {};
+      blobMap = {};
       for (const [name, bytes] of Object.entries(unzipped)) {
         entries[name] = bytes;
-        map[name] = URL.createObjectURL(new Blob([bytes], { type: mimeType(name) }));
+        blobMap[name] = URL.createObjectURL(new Blob([bytes], { type: mimeType(name) }));
       }
 
       progressBar.style.width = '90%';
 
+      // Populate selection
       fileSelect.innerHTML = '';
-      Object.keys(entries).forEach(n => {
+      const names = Object.keys(entries);
+      names.forEach(n => {
         const opt = document.createElement('option');
         opt.value = n;
         opt.textContent = n;
         fileSelect.appendChild(opt);
       });
 
-      if (Object.keys(entries).length) {
-        fileSelect.value = Object.keys(entries)[0];
-        launchFile(Object.keys(entries)[0]);
+      // Auto-select a likely entry point
+      const entry = names.find(n => /index\.html?$/i.test(n)) || names.find(n => /\.html?$/i.test(n)) || names[0];
+
+      if (entry) {
+        fileSelect.value = entry;
+        await launchFile(entry);
         progressBar.style.width = '100%';
         setTimeout(() => progressBar.style.width = '0%', 1000);
       } else {
@@ -192,16 +300,18 @@
       }
     });
 
-    // Handle single HTML upload
+    // Handle single HTML upload (outside ZIP)
     htmlInput.addEventListener('change', async () => {
       const file = htmlInput.files?.[0];
       if (!file) return;
       statusEl.textContent = `Loading ${file.name}…`;
 
+      // Single-file path: use src (not srcdoc) to better mimic local file
       const raw = await file.text();
       const blob = new Blob([raw], { type: 'text/html' });
       stage.src = URL.createObjectURL(blob);
       statusEl.textContent = `Running: ${file.name}`;
+
       fileSelect.innerHTML = '';
       const opt = document.createElement('option');
       opt.value = file.name;
