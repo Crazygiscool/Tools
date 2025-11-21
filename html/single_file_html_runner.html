@@ -1,0 +1,210 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Local ZIP site runner</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { color-scheme: light dark; }
+    body { margin: 0; font: 14px system-ui, sans-serif; }
+    header { padding: 12px; border-bottom: 1px solid #ddd; display: flex; gap: 12px; align-items: center; }
+    #status { flex: 1; opacity: 0.8; }
+    #stage { width: 100%; height: calc(100vh - 52px); border: 0; }
+    label.btn { display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; border: 1px solid #888; border-radius: 6px; cursor: pointer; }
+    input[type=file] { display: none; }
+    .small { font-size: 12px; opacity: 0.7; }
+  </style>
+</head>
+<body>
+  <header>
+    <label class="btn">
+      <strong>Select ZIP</strong>
+      <input id="zip" type="file" accept=".zip" />
+    </label>
+    <span class="small">Contains index.html, assets, JS, and optional .wasm</span>
+    <div id="status">No ZIP loaded</div>
+  </header>
+  <iframe id="stage" sandbox="allow-scripts allow-downloads" referrerpolicy="no-referrer"></iframe>
+
+  <!-- fflate (fast ZIP) – tiny and safe for client-side -->
+  <script>
+    // Minimal unzip (fflate) – inline to avoid external CDNs
+    // Source: https://github.com/101arrowz/fflate (mit). Minimized subset for unzip only.
+    // For brevity, this is a compact build of unzipSync & strFromU8; replace with full library if needed.
+    // BEGIN tiny fflate subset
+    function strFromU8(a){let s="";for(let i=0;i<a.length;i++)s+=String.fromCharCode(a[i]);return s}
+    function u8ToStr(u){if(typeof TextDecoder!=="undefined")return new TextDecoder().decode(u);return strFromU8(u)}
+    function unzipSync(d){function r(b){let o=new DataView(b.buffer,b.byteOffset,b.byteLength),p=0,f={};while(p<b.length){let sig=o.getUint32(p,true);if(sig!==0x04034b50)break;let fl=o.getUint16(p+6,true),cm=o.getUint16(p+8,true),nl=o.getUint16(p+26,true),el=o.getUint16(p+28,true),n=b.subarray(p+30,p+30+nl),name=u8ToStr(n),sz=o.getUint32(p+22,true),csz=o.getUint32(p+18,true);let off=p+30+nl+el,dat=b.subarray(off,off+csz);p=off+csz;let out;if(cm===0){out=dat}else{out=(typeof DecompressionStream!=="undefined")?(()=>{let ds=new DecompressionStream("deflate");return new Response(new Blob([dat]).stream().pipeThrough(ds)).arrayBuffer()})():null}
+        f[name]=out}return f}
+      return { unzipSync } }
+    // END tiny fflate subset
+  </script>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const stage = document.getElementById('stage');
+    const input = document.getElementById('zip');
+
+    // MIME map for Blob URLs
+    const MIME = {
+      "html": "text/html",
+      "htm": "text/html",
+      "css": "text/css",
+      "js": "application/javascript",
+      "mjs": "application/javascript",
+      "json": "application/json",
+      "wasm": "application/wasm",
+      "png": "image/png",
+      "jpg": "image/jpeg",
+      "jpeg": "image/jpeg",
+      "gif": "image/gif",
+      "svg": "image/svg+xml",
+      "txt": "text/plain",
+      "ico": "image/x-icon",
+      "mp4": "video/mp4",
+      "webm": "video/webm",
+      "wav": "audio/wav",
+      "mp3": "audio/mpeg",
+      "woff": "font/woff",
+      "woff2": "font/woff2",
+      "ttf": "font/ttf"
+    };
+
+    function ext(name) {
+      const i = name.lastIndexOf(".");
+      return i === -1 ? "" : name.slice(i+1).toLowerCase();
+    }
+
+    function makeBlobUrl(name, bytes) {
+      const type = MIME[ext(name)] || "application/octet-stream";
+      return URL.createObjectURL(new Blob([bytes], { type }));
+    }
+
+    function rewriteHtmlPaths(html, mapper) {
+      // Rewrite src/href to mapped Blob URLs for relative paths
+      // Handles simple cases (src="...", href="..."). For complex bundlers, adapt as needed.
+      return html.replace(/(src|href)\s*=\s*["']([^"']+)["']/gi, (m, attr, val) => {
+        // Skip absolute URLs and data URLs
+        if (/^(data:|https?:|\/\/)/i.test(val)) return m;
+        const mapped = mapper(val);
+        return `${attr}="${mapped || val}"`;
+      });
+    }
+
+    // Create an iframe document via srcdoc with a fetch interceptor
+    function launchSite(indexHtml, mapUrl) {
+      const interceptor = `
+        <script>
+          (function(){
+            const MAP = ${JSON.stringify(mapUrl)};
+            const resolve = (p) => {
+              try {
+                const url = new URL(p, location.href);
+                const rel = url.pathname.replace(/^\\//,'');
+                return MAP[rel] || MAP[p] || p;
+              } catch(e) {
+                return MAP[p] || p;
+              }
+            };
+            const origFetch = window.fetch.bind(window);
+            window.fetch = (input, init) => {
+              if (typeof input === 'string') {
+                const m = resolve(input);
+                if (MAP[input] || MAP[m]) return origFetch(MAP[input] ? MAP[input] : m, init);
+              } else if (input && input.url) {
+                const m = resolve(input.url);
+                if (MAP[input.url] || MAP[m]) return origFetch(MAP[input.url] ? MAP[input.url] : m, init);
+              }
+              return origFetch(input, init);
+            };
+            const origCreateElement = document.createElement.bind(document);
+            const origSetAttribute = Element.prototype.setAttribute;
+            document.createElement = function(tag){
+              const el = origCreateElement(tag);
+              const set = el.setAttribute.bind(el);
+              el.setAttribute = function(name, value){
+                if ((name === 'src' || name === 'href') && typeof value === 'string') {
+                  const r = resolve(value);
+                  return set(name, r);
+                }
+                return set(name, value);
+              };
+              return el;
+            };
+            // Support WebAssembly.instantiateStreaming against Blob URLs
+            const wasmStream = WebAssembly.instantiateStreaming;
+            if (wasmStream) {
+              WebAssembly.instantiateStreaming = async function(respPromise, importObject){
+                const resp = await respPromise;
+                const ct = resp.headers.get('Content-Type') || '';
+                if (!ct.includes('application/wasm')) {
+                  const buf = await resp.arrayBuffer();
+                  return WebAssembly.instantiate(buf, importObject);
+                }
+                return wasmStream(respPromise, importObject);
+              };
+            }
+          })();
+        </scr` + `ipt>
+      `;
+      const srcdoc = indexHtml + interceptor;
+      stage.srcdoc = srcdoc;
+    }
+
+    input.addEventListener('change', async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+
+      statusEl.textContent = 'Reading ZIP…';
+      const buf = new Uint8Array(await file.arrayBuffer());
+
+      // Unzip
+      let entries;
+      try {
+        // Prefer DecompressionStream path if available; fallback would need a full inflate.
+        const z = unzipSync(buf);
+        // unzipSync in this tiny build returns {name: bytes | Promise<ArrayBuffer>}
+        entries = {};
+        for (const [name, val] of Object.entries(z)) {
+          entries[name] = val instanceof Promise ? new Uint8Array(await val) : val;
+        }
+      } catch (e) {
+        statusEl.textContent = 'Failed to unzip. Use a ZIP with deflate/store.';
+        console.error(e);
+        return;
+      }
+
+      // Build blob URLs and path map
+      const map = {};
+      for (const name of Object.keys(entries)) {
+        const bytes = entries[name];
+        map[name] = makeBlobUrl(name, bytes);
+      }
+
+      // Resolve index.html
+      const indexName =
+        ['index.html', 'Index.html', 'INDEX.HTML'].find(n => map[n]) ||
+        Object.keys(map).find(n => ext(n) === 'html') ||
+        null;
+
+      if (!indexName) {
+        statusEl.textContent = 'No index.html found in ZIP.';
+        return;
+      }
+
+      // Rewrite index.html to point at blob URLs
+      const indexHtmlRaw = new TextDecoder().decode(entries[indexName]);
+      const indexHtml = rewriteHtmlPaths(indexHtmlRaw, (p) => {
+        // Normalize relative path against index directory
+        const baseDir = indexName.includes('/') ? indexName.slice(0, indexName.lastIndexOf('/') + 1) : '';
+        const rel = (baseDir + p).replace(/\\/g,'/').replace(/\/\.\//g,'/').replace(/\/[^\/]+\/\.\.\//g,'/');
+        return map[rel] || map[p] || null;
+      });
+
+      statusEl.textContent = `Loaded ${Object.keys(map).length} files. Launching…`;
+      launchSite(indexHtml, map);
+      statusEl.textContent = `Running: ${indexName}`;
+    });
+  </script>
+</body>
+</html>
