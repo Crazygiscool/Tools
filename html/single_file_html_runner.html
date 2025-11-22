@@ -140,6 +140,20 @@
   // Patch HTML to replace resource paths with blob URLs
   function patchUnityHtml(name) {
     let raw = new TextDecoder().decode(entries[name]);
+
+    // Rewrite file:// references
+    raw = raw.replace(/file:\/\/\/?([^\s"'>]+)/g, (match, path) => {
+      const clean = path.replace(/^\/+/, '');
+      if (blobMap[clean]) {
+        console.log('Rewriting file:// reference:', match, '→', blobMap[clean]);
+        return blobMap[clean];
+      } else {
+        console.warn('Unresolved file:// reference:', match);
+        return match;
+      }
+    });
+
+    // Replace plain relative filenames with blob URLs
     for (const [fname, blobUrl] of Object.entries(blobMap)) {
       const safe = fname.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
       const re = new RegExp(safe, 'g');
