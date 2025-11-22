@@ -114,20 +114,19 @@
 
   function mimeType(name) {
     const lower = name.toLowerCase();
-    if (lower.includes('.html') || lower.includes('.htm')) return 'text/html';
-    if (lower.includes('.js')) return 'application/javascript';
-    if (lower.includes('.css')) return 'text/css';
-    if (lower.includes('.wasm')) return 'application/wasm';
-    if (lower.includes('.data')) return 'application/octet-stream';
-    if (lower.includes('.unityweb')) return 'application/octet-stream';
-    if (lower.includes('.json')) return 'application/json';
-    if (lower.includes('.png')) return 'image/png';
-    if (lower.includes('.jpg') || lower.includes('.jpeg')) return 'image/jpeg';
-    if (lower.includes('.gif')) return 'image/gif';
-    if (lower.includes('.webp')) return 'image/webp';
-    if (lower.includes('.mp3')) return 'audio/mpeg';
-    if (lower.includes('.ogg')) return 'audio/ogg';
-    if (lower.includes('.mp4')) return 'video/mp4';
+    if (lower.endsWith('.html') || lower.endsWith('.htm')) return 'text/html';
+    if (lower.endsWith('.js')) return 'application/javascript';
+    if (lower.endsWith('.css')) return 'text/css';
+    if (lower.endsWith('.wasm')) return 'application/wasm';
+    if (lower.includes('.data') || lower.includes('.unityweb')) return 'application/octet-stream';
+    if (lower.endsWith('.json')) return 'application/json';
+    if (lower.endsWith('.png')) return 'image/png';
+    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+    if (lower.endsWith('.gif')) return 'image/gif';
+    if (lower.endsWith('.webp')) return 'image/webp';
+    if (lower.endsWith('.mp3')) return 'audio/mpeg';
+    if (lower.endsWith('.ogg')) return 'audio/ogg';
+    if (lower.endsWith('.mp4')) return 'video/mp4';
     return 'application/octet-stream';
   }
 
@@ -143,7 +142,11 @@
     let raw = new TextDecoder().decode(entries[name]);
     for (const [fname, blobUrl] of Object.entries(blobMap)) {
       const safe = fname.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-      raw = raw.replace(new RegExp(safe, 'g'), blobUrl);
+      const re = new RegExp(safe, 'g');
+      if (re.test(raw)) {
+        console.log('Patching reference:', fname, '→', blobUrl);
+        raw = raw.replace(re, blobUrl);
+      }
     }
     return raw;
   }
@@ -173,21 +176,29 @@
     statusEl.textContent = `Reading ZIP: ${file.name}…`;
     const buf = new Uint8Array(await file.arrayBuffer());
     progressBar.style.width = '5%';
+
     const unzipped = fflate.unzipSync(buf);
     const names = Object.keys(unzipped);
     const total = names.length;
     entries = {};
     blobMap = {};
+
     for (let idx = 0; idx < names.length; idx++) {
       const name = names[idx];
-      const bytes = unzipped[name];
-      entries[name] = bytes;
-      blobMap[name] = URL.createObjectURL(new Blob([bytes], { type: mimeType(name) }));
-      const percent = Math.round(((idx + 1) / total) * 80) + 10;
-      progressBar.style.width = percent + '%';
-      const sizeKB = (bytes.length / 1024).toFixed(1);
-      statusEl.textContent = `Extracting ${idx + 1}/${total}: ${name} (${sizeKB} KB)`;
+      try {
+        const bytes = unzipped[name];
+        entries[name] = bytes;
+        blobMap[name] = URL.createObjectURL(new Blob([bytes], { type: mimeType(name) }));
+        const percent = Math.round(((idx + 1) / total) * 80) + 10;
+        progressBar.style.width = percent + '%';
+        const sizeKB = (bytes.length / 1024).toFixed(1);
+        statusEl.textContent = `Extracting ${idx + 1}/${total}: ${name} (${sizeKB} KB)`;
+      } catch (err) {
+        console.error('Error extracting', name, err);
+        statusEl.textContent = `Error extracting ${name}`;
+      }
     }
+
     fileSelect.innerHTML = '';
     names.forEach(n => {
       const opt = document.createElement('option');
@@ -195,6 +206,7 @@
       opt.textContent = n;
       fileSelect.appendChild(opt);
     });
+
     const entry = names.find(n => /index\.html?$/i.test(n)) ||
                   names.find(n => /\.html?$/i.test(n)) ||
                   names[0];
@@ -271,6 +283,6 @@
   header.addEventListener('mouseleave', () => {
     header.classList.add('hidden');
   });
-  </script>
+</script>
 </body>
 </html>
